@@ -38,6 +38,17 @@ MiMo Free API 是一个高性能反向代理网关，将小米 MiMo AI 网页端
 - 🌐 **中英双语 + 浅色/暗色主题** — 前端完全国际化
 - ⚡ **单二进制部署** — Go 编译，前端内嵌，开箱即用
 
+### 截图
+
+**仪表盘** — 实时统计 Token 用量、请求量、模型分布
+
+![Dashboard](assets/dashboard.png)
+
+**配置管理** — API 设置、模型切换、账号池管理
+
+![Config](assets/config.png)
+
+
 ### 快速开始
 
 #### 方式一：下载预编译版本
@@ -246,16 +257,6 @@ curl http://localhost:8080/v1/messages \
 |------|------|---------|
 | `mimo-v2.5` | 图片、音频、文件、文本 | 全模态通用场景 |
 | `mimo-v2.5-pro` | 图片、文本（推理增强） | 需要深度推理的纯文本/图片任务 |
-
-### 截图
-
-**仪表盘** — 实时统计 Token 用量、请求量、模型分布
-
-![Dashboard](assets/dashboard.png)
-
-**配置管理** — API 设置、模型切换、账号池管理
-
-![Config](assets/config.png)
 
 ### 技术栈
 
