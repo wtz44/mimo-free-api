@@ -152,9 +152,9 @@ export function ConfigPanel() {
             <Globe className="w-3.5 h-3.5" /> Base URL
           </label>
           <input type="text" value={baseUrl} onChange={e => setBaseUrl(e.target.value)} className={inputClass}
-            placeholder={lang === 'zh' ? '留空表示同源（默认）' : 'Leave empty for same-origin (default)'} />
+            placeholder="http://localhost:8080" />
           <p className={`text-xs ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
-            {lang === 'zh' ? 'API 服务器地址，跨域部署时填写，如 http://your-server:8080' : 'API server address. Set when deploying frontend separately.'}
+            {lang === 'zh' ? '留空则使用当前地址，跨域部署时填完整地址' : 'Leave empty to use current origin, set when deploying separately.'}
           </p>
         </div>
 
