@@ -15,6 +15,7 @@ import (
 	"github.com/wtz44/mimo-gateway/internal/pool"
 	"github.com/wtz44/mimo-gateway/internal/router"
 	"github.com/wtz44/mimo-gateway/internal/stats"
+	"github.com/wtz44/mimo-gateway/internal/toolcall"
 )
 
 type ChatHandler struct {
@@ -65,6 +66,15 @@ func (h *ChatHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
+	}
+
+	// 如果有 tools 定义，注入工具调用指令到 system prompt
+	if len(req.Tools) > 0 {
+		toolPrompt := toolcall.BuildToolPrompt(req.Tools)
+		if toolPrompt != "" {
+			req.Messages = toolcall.InjectToolPrompt(req.Messages, toolPrompt)
+			log.Printf("[tools] injected %d tool definitions into prompt", len(req.Tools))
+		}
 	}
 
 	routeResult := router.RouteModel(req.Model, toMiMoMessages(req.Messages))
@@ -165,7 +175,7 @@ func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, 
 	}()
 
 	if stream {
-		h.streamWebToOpenAI(w, model, msgChan)
+		h.streamWebToOpenAI(w, model, msgChan, len(req.Tools) > 0)
 	} else {
 		h.nonStreamWebToOpenAI(w, model, msgChan)
 	}
@@ -203,20 +213,22 @@ func (h *ChatHandler) handleWebChat(ctx context.Context, w http.ResponseWriter, 
 	}
 }
 
-func (h *ChatHandler) streamWebToOpenAI(w http.ResponseWriter, model string, events <-chan mimo.WebSSEEvent) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-
+func (h *ChatHandler) streamWebToOpenAI(w http.ResponseWriter, model string, events <-chan mimo.WebSSEEvent, hasTools bool) {
 	flusher := w.(http.Flusher)
 	inThinking := false
+
+	var buffered strings.Builder
+
+	writeChunk := func(content string, finish bool) {
+		chunk := adapter.MakeOpenAIStreamChunk(model, content, finish)
+		fmt.Fprintf(w, "data: %s\n\n", chunk)
+		flusher.Flush()
+	}
 
 	for event := range events {
 		if event.Event != "message" {
 			continue
 		}
-
 		var msg struct {
 			Type    string `json:"type"`
 			Content string `json:"content"`
@@ -227,22 +239,41 @@ func (h *ChatHandler) streamWebToOpenAI(w http.ResponseWriter, model string, eve
 		if msg.Type != "text" || msg.Content == "" {
 			continue
 		}
-
-		content := msg.Content
-		content = strings.ReplaceAll(content, "\u0000", "")
-
-		content, inThinking = filterThinkingChunk(content, inThinking)
-		if content == "" {
+		c := strings.ReplaceAll(msg.Content, "\u0000", "")
+		c, inThinking = filterThinkingChunk(c, inThinking)
+		if c == "" {
 			continue
 		}
-
-		chunk := adapter.MakeOpenAIStreamChunk(model, content, false)
-		fmt.Fprintf(w, "data: %s\n\n", chunk)
-		flusher.Flush()
+		if hasTools {
+			buffered.WriteString(c)
+		} else {
+			writeChunk(c, false)
+		}
 	}
 
-	doneChunk := adapter.MakeOpenAIStreamChunk(model, "", true)
-	fmt.Fprintf(w, "data: %s\n\n", doneChunk)
+	if hasTools {
+		finalText := strings.TrimSpace(buffered.String())
+		log.Printf("[tools] raw output (len=%d): %q", len(finalText), finalText[:min(len(finalText), 500)])
+		if toolcall.HasToolCallSyntax(finalText) {
+			calls := toolcall.ParseToolCallsFromText(finalText)
+			log.Printf("[tools] parsed %d calls from text", len(calls))
+			for i, c := range calls {
+				log.Printf("[tools] call[%d]: name=%s input=%v", i, c.Name, c.Input)
+			}
+			if len(calls) > 0 {
+				toolCalls := toolcall.ConvertToolCallsToOpenAI(calls)
+				log.Printf("[tools] detected %d tool calls in stream", len(toolCalls))
+				toolChunk := adapter.MakeOpenAIStreamToolCallChunk(model, toolCalls, true)
+				fmt.Fprintf(w, "data: %s\n\n", toolChunk)
+				fmt.Fprintf(w, "data: [DONE]\n\n")
+				flusher.Flush()
+				return
+			}
+		}
+		writeChunk(finalText, false)
+	}
+
+	writeChunk("", true)
 	fmt.Fprintf(w, "data: [DONE]\n\n")
 	flusher.Flush()
 }
@@ -298,7 +329,29 @@ func (h *ChatHandler) nonStreamWebToOpenAI(w http.ResponseWriter, model string, 
 		}
 	}
 
-	resp := adapter.MakeOpenAIResponse(model, strings.TrimSpace(content.String()))
+
+	finalText := strings.TrimSpace(content.String())
+
+	// 检测是否包含工具调用
+	log.Printf("[tools] non-stream raw output (len=%d): %q", len(finalText), finalText[:min(len(finalText), 500)])
+	if toolcall.HasToolCallSyntax(finalText) {
+		calls := toolcall.ParseToolCallsFromText(finalText)
+		log.Printf("[tools] non-stream parsed %d calls", len(calls))
+		for i, c := range calls {
+			log.Printf("[tools] call[%d]: name=%s input=%v", i, c.Name, c.Input)
+		}
+		if len(calls) > 0 {
+			toolCalls := toolcall.ConvertToolCallsToOpenAI(calls)
+			log.Printf("[tools] detected %d tool calls in response", len(toolCalls))
+			resp := adapter.MakeOpenAIToolCallResponse(model, toolCalls)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write(resp)
+			return
+		}
+	}
+
+	resp := adapter.MakeOpenAIResponse(model, finalText)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write(resp)
