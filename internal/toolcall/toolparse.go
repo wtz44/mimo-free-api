@@ -105,7 +105,12 @@ func isTagBoundary(text string, idx int) bool {
 		return true
 	}
 	r, _ := utf8.DecodeRuneInString(text[idx:])
-	return normalizeFullwidth(r) == '>'
+	norm := normalizeFullwidth(r)
+	// Also treat fullwidth pipe ｜ (U+FF5C) as tag boundary for DSML tags like ｜DSML｜invoke
+	if norm == '|' || r == '|' {
+		return true
+	}
+	return norm == '>'
 }
 
 // ===== XML block finder (state machine) =====
@@ -223,42 +228,72 @@ func parseParamValue(raw string) any {
 	return html.UnescapeString(trimmed)
 }
 
-// ===== DSML format parser =====
+// ===== DSML format parser (state-machine based) =====
 
 var dsmlWrapperRe = regexp.MustCompile(`(?is)<(?:｜|)DSML(?:｜|)tool_calls(?:｜|)>([\s\S]*?)</(?:｜|)DSML(?:｜|)tool_calls(?:｜|)>`)
 var dsmlInvokeRe = regexp.MustCompile(`(?is)<(?:｜|)DSML(?:｜|)invoke\s+name\s*=\s*\"([^\"]*)\"(?:｜|)?\s*>([\s\S]*?)</(?:｜|)DSML(?:｜|)invoke(?:｜|)?>`)
 var dsmlParamRe = regexp.MustCompile(`(?is)<(?:｜|)DSML(?:｜|)parameter\s+name\s*=\s*\"([^\"]*)\"(?:｜|)?\s*>([\s\S]*?)</(?:｜|)DSML(?:｜|)parameter(?:｜|)?>`)
 
+// normalizeDSMLText replaces fullwidth ｜ (U+FF5C) with ASCII | and strips DSML prefix
+// from tags so findBlocks can match them as plain XML tags.
+func normalizeDSMLText(text string) string {
+	r := strings.ReplaceAll(text, "\uff5c", "|")
+	// Strip DSML prefix: <|DSML|tag> → <tag>, </|DSML|tag> → </tag>
+	r = regexp.MustCompile(`(?is)<(/?)\|DSML\|`).ReplaceAllString(r, "<$1")
+	return r
+}
+
+// dsmlExtractName extracts the name attribute from a DSML block's opening tag.
+func dsmlExtractName(b xmlBlock) string {
+	if n := parseAttrs(b.Attrs)["name"]; n != "" {
+		return n
+	}
+	return ""
+}
+
+// dsmlParseParams recursively parses DSML <parameter> children from a body string.
+// Returns a map where keys are parameter names and values are either strings or nested maps.
+// Repeated keys (e.g. multiple "item" parameters) are automatically collected into arrays.
+// Parameters without a name attribute have their children merged into the parent result.
+func dsmlParseParams(body string) map[string]any {
+	norm := normalizeDSMLText(body)
+	result := map[string]any{}
+	for _, pb := range findBlocks(norm, "parameter") {
+		name := dsmlExtractName(pb)
+		children := dsmlParseParams(pb.Body)
+		if name == "" {
+			// No name attribute — merge children directly into parent result
+			for k, v := range children {
+				appendVal(result, k, v)
+			}
+			continue
+		}
+		if len(children) > 0 {
+			appendVal(result, name, children)
+		} else {
+			appendVal(result, name, parseParamValue(pb.Body))
+		}
+	}
+	return result
+}
+
+// parseDSML parses DSML-formatted tool calls using state-machine XML parsing.
+// This replaces the previous regex-based parser which couldn't handle nested parameters.
 func parseDSML(text string) []ParsedToolCall {
-	wm := dsmlWrapperRe.FindAllStringSubmatch(text, -1)
-	if len(wm) == 0 {
+	norm := normalizeDSMLText(text)
+	wrappers := findBlocks(norm, "tool_calls")
+	if len(wrappers) == 0 {
 		return nil
 	}
 	var calls []ParsedToolCall
-	for _, w := range wm {
-		if len(w) < 2 {
-			continue
-		}
-		for _, im := range dsmlInvokeRe.FindAllStringSubmatch(w[1], -1) {
-			if len(im) < 3 {
-				continue
-			}
-			name := strings.TrimSpace(im[1])
+	for _, w := range wrappers {
+		for _, inv := range findBlocks(w.Body, "invoke") {
+			attrs := parseAttrs(inv.Attrs)
+			name := strings.TrimSpace(html.UnescapeString(attrs["name"]))
 			if name == "" {
 				continue
 			}
-			input := map[string]any{}
-			for _, pm := range dsmlParamRe.FindAllStringSubmatch(im[2], -1) {
-				if len(pm) < 3 {
-					continue
-				}
-				pname := strings.TrimSpace(pm[1])
-				if pname == "" {
-					continue
-				}
-				val := parseParamValue(pm[2])
-				appendVal(input, pname, val)
-			}
+			input := dsmlParseParams(inv.Body)
 			calls = append(calls, ParsedToolCall{Name: name, Input: input})
 		}
 	}

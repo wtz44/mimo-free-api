@@ -67,7 +67,7 @@ func TrimContext(messages []prompt.Message) []prompt.Message {
 		return messages
 	}
 
-	// Phase 1: Truncate large tool results
+	// Phase 1: Truncate large tool results and assistant messages
 	origChars := 0
 	for _, msg := range messages {
 		origChars += utf8.RuneCountInString(msg.Content)
@@ -81,6 +81,12 @@ func TrimContext(messages []prompt.Message) []prompt.Message {
 		}
 		// Also truncate very long user messages that might contain tool_result blocks
 		if msg.Role == "user" && utf8.RuneCountInString(msg.Content) > MaxToolResultChars*2 {
+			messages[i].Content = truncateRunes(msg.Content, MaxToolResultChars*2) +
+				fmt.Sprintf("\n[truncated — original was %d chars]", utf8.RuneCountInString(msg.Content))
+			truncated++
+		}
+		// Truncate large assistant messages (e.g. containing full file content in tool_use blocks)
+		if msg.Role == "assistant" && utf8.RuneCountInString(msg.Content) > MaxToolResultChars*2 {
 			messages[i].Content = truncateRunes(msg.Content, MaxToolResultChars*2) +
 				fmt.Sprintf("\n[truncated — original was %d chars]", utf8.RuneCountInString(msg.Content))
 			truncated++

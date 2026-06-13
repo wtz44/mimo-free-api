@@ -32,7 +32,7 @@ type WebClient struct {
 // NewWebClient 创建网页端客户端
 func NewWebClient(serviceToken, userID, ph string) *WebClient {
 	return &WebClient{
-		httpClient:   &http.Client{Timeout: 5 * time.Minute},
+		httpClient:   &http.Client{Timeout: 30 * time.Minute},
 		serviceToken: serviceToken,
 		userID:       userID,
 		ph:           ph,

@@ -187,6 +187,103 @@ func TestParsePercentToolCalls(t *testing.T) {
 	t.Logf("percent format OK: %d calls parsed, stripped=%q", len(calls), stripped)
 }
 
+func TestParseNestedDSMLParams(t *testing.T) {
+	// Simulate the exact output mimo-v2.5-pro generates for the "question" tool
+	// with nested parameters (questions > item > header/options/item)
+	LT := "\x3c"
+	GT := "\x3e"
+	SL := "\x2f"
+	FW := "\uff5c" // fullwidth ｜
+
+	text := LT + FW + "DSML" + FW + "tool_calls" + GT + "\n" +
+		"  " + LT + FW + "DSML" + FW + "invoke name=\"question\"" + GT + "\n" +
+		"    " + LT + FW + "DSML" + FW + "parameter name=\"questions\"" + GT + "\n" +
+		"      " + LT + FW + "DSML" + FW + "parameter name=\"item\"" + GT + "\n" +
+		"        " + LT + FW + "DSML" + FW + "parameter name=\"header\"" + GT + "迷宫风格" + LT + SL + FW + "DSML" + FW + "parameter" + GT + "\n" +
+		"        " + LT + FW + "DSML" + FW + "parameter name=\"options\"" + GT + "\n" +
+		"          " + LT + FW + "DSML" + FW + "parameter name=\"item\"" + GT + "\n" +
+		"            " + LT + FW + "DSML" + FW + "parameter name=\"description\"" + GT + "精致木质感" + LT + SL + FW + "DSML" + FW + "parameter" + GT + "\n" +
+		"            " + LT + FW + "DSML" + FW + "parameter name=\"label\"" + GT + "木质3D" + LT + SL + FW + "DSML" + FW + "parameter" + GT + "\n" +
+		"          " + LT + SL + FW + "DSML" + FW + "parameter" + GT + "\n" +
+		"          " + LT + FW + "DSML" + FW + "parameter name=\"item\"" + GT + "\n" +
+		"            " + LT + FW + "DSML" + FW + "parameter name=\"description\"" + GT + "霓虹灯风格" + LT + SL + FW + "DSML" + FW + "parameter" + GT + "\n" +
+		"            " + LT + FW + "DSML" + FW + "parameter name=\"label\"" + GT + "霓虹科幻" + LT + SL + FW + "DSML" + FW + "parameter" + GT + "\n" +
+		"          " + LT + SL + FW + "DSML" + FW + "parameter" + GT + "\n" +
+		"        " + LT + SL + FW + "DSML" + FW + "parameter" + GT + "\n" +
+		"        " + LT + FW + "DSML" + FW + "parameter name=\"question\"" + GT + "你希望迷宫是什么风格？" + LT + SL + FW + "DSML" + FW + "parameter" + GT + "\n" +
+		"      " + LT + SL + FW + "DSML" + FW + "parameter" + GT + "\n" +
+		"    " + LT + SL + FW + "DSML" + FW + "parameter" + GT + "\n" +
+		"  " + LT + SL + FW + "DSML" + FW + "invoke" + GT + "\n" +
+		LT + SL + FW + "DSML" + FW + "tool_calls" + GT
+
+	t.Logf("Input text length: %d", len(text))
+
+	if !HasToolCallSyntax(text) {
+		t.Fatal("HasToolCallSyntax returned false for nested DSML format")
+	}
+
+	calls := ParseToolCallsFromText(text)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+
+	call := calls[0]
+	if call.Name != "question" {
+		t.Errorf("expected name=question, got %s", call.Name)
+	}
+
+	t.Logf("Parsed input: %+v", call.Input)
+
+	// Structure: questions -> item -> {header, options, question}
+	questions, ok := call.Input["questions"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected questions to be map, got %T: %v", call.Input["questions"], call.Input["questions"])
+	}
+
+	item, ok := questions["item"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected questions.item to be map, got %T: %v", questions["item"], questions["item"])
+	}
+
+	// Verify header
+	if item["header"] != "迷宫风格" {
+		t.Errorf("expected header=迷宫风格, got %v", item["header"])
+	}
+
+	// Verify question text
+	if item["question"] != "你希望迷宫是什么风格？" {
+		t.Errorf("expected question text, got %v", item["question"])
+	}
+
+	// Verify options is a map with item array
+	options, ok := item["options"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected options to be map, got %T: %v", item["options"], item["options"])
+	}
+
+	items, ok := options["item"].([]any)
+	if !ok {
+		t.Fatalf("expected options.item to be array, got %T: %v", options["item"], options["item"])
+	}
+
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items in options, got %d", len(items))
+	}
+
+	item0, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected item[0] to be map, got %T", items[0])
+	}
+	if item0["description"] != "精致木质感" {
+		t.Errorf("expected item[0].description=精致木质感, got %v", item0["description"])
+	}
+	if item0["label"] != "木质3D" {
+		t.Errorf("expected item[0].label=木质3D, got %v", item0["label"])
+	}
+
+	t.Logf("Nested DSML parsing OK: questions.item has %d keys, options has %d items", len(item), len(items))
+}
+
 func TestParseNestedToolCalls(t *testing.T) {
 	// Model outputs nested format: <tool_call> containing <function=X>
 	LT := "\x3c"
